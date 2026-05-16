@@ -23,6 +23,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
+#include "pes.h"
+#include "tree.h"
 
 // ─── PROVIDED ────────────────────────────────────────────────────────────────
 
@@ -135,10 +137,40 @@ int index_status(const Index *index) {
 //
 // Returns 0 on success, -1 on error.
 int index_load(Index *index) {
-    // TODO: Implement index loading
-    // (See Lab Appendix for logical steps)
-    (void)index;
-    return -1;
+    FILE *f = fopen(".pes/index", "r");
+
+    if (!f) {
+        index->count = 0;
+        return 0;
+    }
+
+    index->count = 0;
+
+    char line[512];
+
+    while (fgets(line, sizeof(line), f)){
+        if(index->count >= MAX_INDEX_ENTRIES) break;
+
+        IndexEntry *e = &index->entries[index->count];
+
+        char hash_hex[65];
+
+        int ret = sscanf(line, "%o %64s %ld %u %255[^\n]\n",
+                         &e->mode,
+                         hash_hex,
+                         &e->mtime_sec,
+                         &e->size,
+                         e->path);
+
+        if (ret != 5) continue;
+
+        hex_to_hash(hash_hex, &e->hash);
+
+        index->count++;
+    }
+
+    fclose(f);
+    return 0;
 }
 
 // Save the index to .pes/index atomically.
@@ -151,11 +183,42 @@ int index_load(Index *index) {
 //   - rename                           : atomically moving the temp file over the old index
 //
 // Returns 0 on success, -1 on error.
+static int cmp_index(const void *a, const void *b) {
+    return strcmp(((IndexEntry *)a)->path, ((IndexEntry *)b)->path);
+}
+
 int index_save(const Index *index) {
-    // TODO: Implement atomic index saving
-    // (See Lab Appendix for logical steps)
-    (void)index;
-    return -1;
+    char tmp[] = ".pes/index.tmp";
+
+    FILE *f = fopen(tmp, "w");
+    if (!f) return -1;
+
+    Index *sorted = malloc(sizeof(Index));
+    if (!sorted) return -1;
+
+    memcpy(sorted, index, sizeof(Index));
+    qsort(sorted->entries, sorted->count, sizeof(IndexEntry), cmp_index);
+
+    for (int i = 0; i < sorted->count; i++) {
+        const IndexEntry *e = &sorted->entries[i];
+
+        char hex[65];
+        hash_to_hex(&e->hash, hex);
+
+        fprintf(f, "%o %s %ld %u %s\n",
+                e->mode,
+                hex,
+                e->mtime_sec,
+                e->size,
+                e->path);
+    }
+
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+    free(sorted);
+
+    return rename(tmp, ".pes/index");
 }
 
 // Stage a file for the next commit.
@@ -168,8 +231,60 @@ int index_save(const Index *index) {
 //
 // Returns 0 on success, -1 on error.
 int index_add(Index *index, const char *path) {
-    // TODO: Implement file staging
-    // (See Lab Appendix for logical steps)
-    (void)index; (void)path;
-    return -1;
+    index->count = 0;
+    memset(index, 0, sizeof(Index));
+    if (index_load(index) != 0) {
+        return -1;
+    }
+    if (index->count < 0 || index->count > MAX_INDEX_ENTRIES) {
+        index->count = 0;
+    }
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        perror("stat failed");
+        return -1;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    void *data = malloc(st.st_size ? st.st_size : 1);
+    if (!data) {
+        fclose(f);
+        return -1;
+    }
+
+    if (fread(data, 1, st.st_size, f) != st.st_size) {
+        fclose(f);
+        free(data);
+        return -1;
+    }
+    fclose(f);
+
+    ObjectID oid;
+    printf("Before object_write\n");
+    if (object_write(OBJ_BLOB, data, st.st_size, &oid) != 0) {
+        free(data);
+        return -1;
+    }
+    printf("After object_write\n");
+    free(data);
+
+    IndexEntry *e = index_find(index, path);
+    if (!e) {
+        if (index->count >= MAX_INDEX_ENTRIES) {
+            return -1;
+        }
+        e = &index->entries[index->count++];
+    }
+
+    strncpy(e->path, path, sizeof(e->path) - 1);
+    e->path[sizeof(e->path) - 1] = '\0';
+
+    e->mode = st.st_mode;
+    e->mtime_sec = st.st_mtime;
+    e->size = st.st_size;
+    e->hash = oid;
+
+    return index_save(index);
 }
