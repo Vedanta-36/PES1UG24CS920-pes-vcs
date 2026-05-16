@@ -194,8 +194,61 @@ int head_update(const ObjectID *new_commit) {
 //
 // Returns 0 on success, -1 on error.
 int commit_create(const char *message, ObjectID *commit_id_out) {
-    // TODO: Implement commit creation
-    // (See Lab Appendix for logical steps)
-    (void)message; (void)commit_id_out;
-    return -1;
+    Index *index = malloc(sizeof(Index));
+    if (!index) return -1;
+
+    if (index_load(index) != 0) {
+        fprintf(stderr, "error: failed to load index\n");
+        return -1;
+    }
+
+    if (index->count == 0) {
+        fprintf(stderr, "error: nothing to commit\n");
+        return -1;
+    }
+    
+    ObjectID tree_id;
+    if (tree_from_index(&tree_id) != 0) {
+        fprintf(stderr, "error: failed to create tree\n");
+        return -1;
+    }
+
+    Commit c;
+    memset(&c, 0, sizeof(Commit));
+
+    c.tree = tree_id;
+
+    if (head_read(&c.parent) == 0) {
+        c.has_parent = 1;
+    } else {
+        c.has_parent = 0;
+    }
+
+    const char *author = pes_author();
+    if (!author) author = "default";
+    
+    snprintf(c.author, sizeof(c.author), "%s", author);
+    c.timestamp = (uint64_t)time(NULL);
+
+    snprintf(c.message, sizeof(c.message), "%s", message);
+
+    void *data;
+    size_t len;
+
+    if (commit_serialize(&c, &data, &len) != 0) {
+        return -1;
+    }
+
+    if (object_write(OBJ_COMMIT, data, len, commit_id_out) != 0) {
+        free(data);
+        return -1;
+    }
+
+    free(data);
+
+    if (head_update(commit_id_out) != 0) {
+        return -1;
+    }
+
+    return 0;
 }
